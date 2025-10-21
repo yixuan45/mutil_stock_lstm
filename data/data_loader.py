@@ -5,6 +5,7 @@ import os
 import torch
 import logging
 import numpy as np
+import talib as ta
 import pandas as pd
 
 # from import
@@ -79,8 +80,12 @@ class DataProcessor(object):
 
         logger.info("开始数据预处理...")
 
+        # 构造特征
+        self._create_feature()
+        config['input_dim'] = len(self.data.columns) - 1  # 将构造的特征长度赋值给config配置项
+
         # 选择特征列（排除目标列）
-        target_column='c_pred' # 目标价格列
+        target_column = 'c_pred'  # 目标价格列
         feature_columns = [col for col in self.data.columns if col != target_column]  # 特征列
 
         # 先对数据进行一阶差分
@@ -93,6 +98,107 @@ class DataProcessor(object):
         self._create_sequences(feature_columns, target_column)
         logger.info("数据预处理完成")
 
+    def _create_feature(self):
+        """为数据构造相关特征"""
+        cur_data = self.data.copy()
+
+        logger.info(f"构造rsi和rsi_ma数据")
+        # 构造rsi数据和rsi_ma数据
+        self.data['rsi'] = ta.RSI(cur_data['c'], timeperiod=self.config['rsi_len'])
+        self.data['rsi_mean'] = self.data['rsi'].rolling(window=self.config['rsi_mean_len']).mean()
+
+        logger.info(f"构造macd数据")
+        # 构造macd数据
+        self.data['macd'], self.data['macd_signal'], _ = ta.MACD(cur_data['c'],
+                                                                 fastperiod=self.config['macd_fastperiod'],
+                                                                 slowperiod=self.config['macd_slowperiod'],
+                                                                 signalperiod=self.config['macd_signalperiod'])
+        logger.info(f"构造波动率atr数据")
+        self.data['atr'] = self._calculate_atr(cur_data, timeperiod=self.config['atr_period'])
+
+        logger.info(f"构造高低点斜率")
+        # 构造高低点斜率
+        self.data['high_slope'] = (cur_data['h'] - cur_data['h'].shift(self.config['high_slope_len'])) / self.config[
+            'high_slope_len']
+
+        logger.info(f"构造量价关系")
+        # 构造量价关系
+        condition = (
+            # 情况1：收盘价 > 开盘价（阳线）且成交量 > 前一日成交量（放量）
+                (cur_data['c'] > cur_data['o']) & (cur_data['v'] > cur_data['v'].shift(1))
+                |  # 或者
+                # 情况2：收盘价 < 开盘价（阴线）且成交量 < 前一日成交量（缩量）
+                (cur_data['c'] < cur_data['o']) & (cur_data['v'] < cur_data['v'].shift(1))
+        )
+        self.data['vol_price_sync'] = condition.astype(int)
+
+        logger.info(f"构造布林带数据")
+        # 构造布林带数据
+        self.data['bollinger_band_pos'] = self._calculate_bollinger_band_pos(cur_data,
+                                                                             bb_timeperiod=self.config['bb_timeperiod'],
+                                                                             bb_dev=self.config['bb_dev'])
+
+        logger.info(f"计算背离程度")
+        # 计算背离程度
+        self.data['rsi_divergence'] = self._calculate_rsi_divergence(cur_data=self.data,
+                                                                     rsi_divergence_length=self.config[
+                                                                         'rsi_divergence_length'])
+        self.data = self.data.dropna()
+
+    @staticmethod
+    def _calculate_atr(cur_data, timeperiod=14):
+        # 构造波动率数据
+        tr1 = cur_data['h'] - cur_data['l']
+        tr2 = abs(cur_data['h'] - cur_data['c'].shift(1))
+        tr3 = abs(cur_data['c'].shift(1) - cur_data['l'])
+        cur_data['tr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        cur_data['atr'] = cur_data['tr'].rolling(window=timeperiod).mean()
+        return cur_data['atr']
+
+    @staticmethod
+    def _calculate_rsi_divergence(cur_data, rsi_divergence_length=5):
+        """
+            计算RSI背离程度
+            :param divergence_window: 对比背离的周期（默认5日，即看5日内价格与RSI的变化）
+            :return: 包含RSI背离程度的Series
+        """
+        # 价格涨跌幅：今日收盘价 - N日前收盘价
+        cur_data['price_change'] = cur_data['c'] - cur_data['c'].shift(rsi_divergence_length)
+        # RSI涨跌幅：今日RSI - N日前RSI
+        cur_data['rsi_change'] = cur_data['rsi'] - cur_data['rsi'].shift(rsi_divergence_length)
+
+        cur_data['rsi_divergence'] = cur_data['price_change'] - cur_data['rsi_change']
+
+        return cur_data['rsi_divergence']
+
+    @staticmethod
+    def _calculate_bollinger_band_pos(cur_data, bb_timeperiod=20, bb_dev=2):
+        """
+        计算布林带位置
+        :param cur_data: 包含收盘价（c）的DataFrame
+        :param window: 布林带中轨周期（默认20日，常用值）
+        :param window_dev: 标准差倍数（默认2，控制布林带宽度）
+        :return: 包含布林带位置的Series
+        """
+        # 1. 计算中轨（window周期的收盘价移动平均）
+        cur_data['bb_middle'] = cur_data['c'].rolling(window=bb_timeperiod).mean()
+
+        # 2.计算收盘价与中轨的偏差（用于求标准差）
+        cur_data['price_deviation'] = cur_data['c'] - cur_data['bb_middle']
+
+        # 3.计算窗口内的标准差（衡量价格波动幅度）
+        cur_data['rolling_std'] = cur_data['price_deviation'].rolling(window=bb_timeperiod).std(ddof=0)
+
+        # 4.计算上轨和下轨
+        cur_data['bb_upper'] = cur_data['bb_middle'] + bb_dev * cur_data['rolling_std']
+        cur_data['bb_lower'] = cur_data['bb_middle'] - bb_dev * cur_data['rolling_std']
+
+        # 5.计算布林带位置
+        denominator = cur_data['bb_upper'] - cur_data['bb_lower']
+        cur_data['bollinger_band_pos'] = (cur_data['c'] - cur_data['bb_lower']) / denominator
+
+        return cur_data['bollinger_band_pos']
+
     def _time_series_differencer(self):
         """对有明显时序特征的数据进行差分处理"""
         logger.info("对有明显时序特征的数据进行差分进行处理")
@@ -100,7 +206,7 @@ class DataProcessor(object):
         self.first_values = {}
 
         # 记录需要差分的特征
-        diff_features = ['o', 'h', 'l', 'c', 'c_pred','v','qv']
+        diff_features = ['o', 'h', 'l', 'c', 'c_pred', 'v', 'qv']
 
         # 对当前的first_values进行初始化
         for feature in diff_features:

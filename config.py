@@ -11,7 +11,7 @@ def get_config():
     global current_time
     parser = argparse.ArgumentParser(description='LSTM_stock_predict')
 
-    # 1.数据相关配置（完全复用原框架）
+    # 1.数据相关配置
     data_group = parser.add_argument_group('data_config')
     data_group.add_argument('--data_path', type=str, default='./data/min_eth_data.csv', help='data path')
     data_group.add_argument('--sequence_length', type=int, default=100, help='input sequence length')
@@ -23,7 +23,20 @@ def get_config():
     data_group.add_argument('--normalization', type=str, default='standard',
                             choices=['minmax', 'standard', 'robust', 'none'], help='normalization type')
 
-    # 2.模型相关配置(新增LSTM专属参数，其余复用)
+    # 2.特征参数相关配置
+    feature_group = parser.add_argument_group('feature_config')
+    feature_group.add_argument('--rsi_len', type=int, default=12, help='the length of rsi')
+    feature_group.add_argument('--rsi_mean_len', type=int, default=15, help='the length of rsi mean')
+    feature_group.add_argument('--macd_fastperiod', type=int, default=12, help='the fastperiod of macd')
+    feature_group.add_argument('--macd_slowperiod', type=int, default=26, help='the slowperiod of macd')
+    feature_group.add_argument('--macd_signalperiod', type=int, default=9, help='the signalperiod of macd')
+    feature_group.add_argument('--atr_period', type=int, default=14, help='the period of atr')
+    feature_group.add_argument('--high_slope_len', type=int, default=6, help='the length of high slope')
+    feature_group.add_argument('--bb_timeperiod', type=int, default=12, help='the timeperiod of bb')
+    feature_group.add_argument('--bb_dev', type=int, default=2, help='the dev period of bb')
+    feature_group.add_argument('--rsi_divergence_length', type=int, default=5, help='the length of divergence')
+
+    # 3.模型相关配置
     model_group = parser.add_argument_group('model_config')
     model_group.add_argument('--model_type', type=str, default='lstm', choices=['lstm'], help='model type')
     model_group.add_argument('--input_dim', type=int, default=6, help='the dimension of input')
@@ -32,10 +45,10 @@ def get_config():
     model_group.add_argument('--num_layers', type=int, default=2, help='the number of LSTM layers')
     model_group.add_argument('--dropout', type=float, default=0.2, help='the dropout rate')
 
-    # 3. 训练相关配置（完全复用原框架）
+    # 4. 训练相关配置
     train_group = parser.add_argument_group('train_config')
     train_group.add_argument('--epochs', type=int, default=30, help='the number of epochs')
-    train_group.add_argument('--lr', type=float, default=1e-3, help='the learning rate')
+    train_group.add_argument('--lr', type=float, default=1e-5, help='the learning rate')
     train_group.add_argument('--weight_decay', type=float, default=1e-5, help='the weight decay')
     train_group.add_argument('--loss_fn', type=str, default='huber', choices=['mse', 'huber', 'mae'],
                              help='损失函数（Huber对异常值鲁棒）')
@@ -47,7 +60,7 @@ def get_config():
     train_group.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                              choices=['cpu', 'cuda'], help='训练设备')
 
-    # 4. 日志和保存配置（完全复用原框架）
+    # 5. 日志和保存配置
     log_group = parser.add_argument_group('日志和保存配置')
     log_group.add_argument('--log_level', type=str, default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                            help='日志级别')
