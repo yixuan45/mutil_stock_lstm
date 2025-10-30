@@ -3,6 +3,7 @@
 # import
 import os
 import torch
+import json
 import logging
 import numpy as np
 import talib as ta
@@ -40,7 +41,7 @@ class PriceDataset(Dataset):
 class DataProcessor(object):
     """数据处理类，负责数据加载、预处理和数据集创建"""
 
-    def __init__(self):
+    def __init__(self, data=None):
         self.config = config
         self.data = None
         self.X = None
@@ -81,7 +82,7 @@ class DataProcessor(object):
         logger.info("开始数据预处理...")
 
         # 构造特征
-        self._create_feature()
+        self.create_feature()
         config['input_dim'] = len(self.data.columns) - 1  # 将构造的特征长度赋值给config配置项
 
         # 选择特征列（排除目标列）
@@ -98,7 +99,12 @@ class DataProcessor(object):
         self._create_sequences(feature_columns, target_column)
         logger.info("数据预处理完成")
 
-    def _create_feature(self):
+    def testprocess_data(self):
+        """测试时候，处理数据，标准化和创建序列"""
+        if self.data is None:
+            raise ValueError("请先初始化对象，获取数据")
+
+    def create_feature(self):
         """为数据构造相关特征"""
         cur_data = self.data.copy()
 
@@ -229,19 +235,12 @@ class DataProcessor(object):
 
     def _normalize_data(self, feature_columns, target_column):
         """标准化特征和目标变量"""
-        logger.info(f"使用{self.config['normalization']}标准化所有特征和目标变量")
+        logger.info(f"使用{self.config['normalization']}滚动标准化所有特征和目标变量")
 
-        if self.config['normalization'] == 'minmax':
-            self.scaler_features = MinMaxScaler(feature_range=(0, 1))
-            self.scaler_target = MinMaxScaler(feature_range=(0, 1))
-        elif self.config['normalization'] == 'standard':
-            self.scaler_features = StandardScaler()
-            self.scaler_target = StandardScaler()
-        elif self.config['normalization'] == 'robust':
-            self.scaler_features = RobustScaler()
-            self.scaler_target = RobustScaler()
+        window_size = self.config['sequence_length']  # 滑动标准化的窗口和输入长度相同
+        norm_type = self.config['normalization']
 
-        # 划分时序训练/验证/测试集的索引（按时间顺序，不打乱）
+        # 划分时序训练/验证/测试集的索引
         total_len = len(self.data)
         test_len = int(total_len * self.config['test_size'])
         val_len = int(total_len * self.config['val_size'])
@@ -252,18 +251,27 @@ class DataProcessor(object):
         val_idx = range(train_len, train_len + val_len)
         test_idx = range(train_len + val_len, total_len)
 
-        # 拟合训练数据的特征
-        self.scaler_features.fit(self.data.iloc[train_idx][feature_columns])
+        # 保存最后一个滑动窗口的数据
+        self.update_last_stats(data=self.data, window_size=window_size)
 
-        # 拟合训练数据的目标
-        self.scaler_target.fit(self.data.iloc[train_idx][[target_column]])
+        # ---------------------- 特征滚动标准化 ----------------------
+        self.scaler_features = {}
+        for col in tqdm(feature_columns):
+            # 对每个特征单独创建滚动标准化器
+            scaler = RollingScaler(window_size=window_size, scaler_type=norm_type)
+            all_data = self.data[col].values
 
-        # 转换特征
-        self.data.loc[:, feature_columns] = self.scaler_features.transform(self.data[feature_columns])
+            normalized_data = scaler.fit_transform(all_data)
+            self.data.loc[:, col] = normalized_data
+            self.scaler_features[col] = scaler  # 保存每个特征的标准化器
 
-        # 转换目标
-        self.data.loc[:, target_column] = self.scaler_target.transform(self.data[[target_column]])
+        # ---------------------- 目标列滚动标准化 ----------------------
+        self.scaler_target = RollingScaler(window_size=window_size, scaler_type=norm_type)
+        target_data = self.data[target_column].values
+        normalized_target = self.scaler_target.fit_transform(target_data)
+        self.data.loc[:, target_column] = normalized_target
 
+        # 保存最后一个时间段的目标列标准化参数（用于后续推演）
         logger.info(f"训练集特征标准化完成")
         logger.info(f"验证集特征标准化完成")
         logger.info(f"测试集特征标准化完成")
@@ -271,6 +279,13 @@ class DataProcessor(object):
         logger.info(f"训练集特征均值:{self.data.iloc[train_idx][feature_columns].mean().values}")
         logger.info(f"验证集特征均值:{self.data.iloc[val_idx][feature_columns].mean().values}")
         logger.info(f"测试集特征均值:{self.data.iloc[test_idx][feature_columns].mean().values}")
+
+    @staticmethod
+    def update_last_stats(data, window_size):
+        """更新最后一个窗口的统计量（用于后续预测）"""
+        start_idx = max(0, len(data) - window_size)
+        window_data = data[start_idx:]
+        window_data.to_csv("./data/window_data.csv", index=True)
 
     def _create_sequences(self, feature_columns, target_column):
         """创建输入序列和目标序列"""
@@ -345,5 +360,86 @@ class DataProcessor(object):
     def inverse_transform_target(self, scaled_data):
         """将标准化的目标数据转换回原始尺度"""
         if self.scaler_target and self.config['normalization'] != 'none':
-            return self.scaler_target.inverse_transform(scaled_data.reshape(-1, 1)).flatten()
+            return self.scaler_target.inverse_transform(scaled_data)
         return scaled_data
+
+
+class RollingScaler(object):
+    """滚动标准化器，支持华东窗口计算统计量"""
+
+    def __init__(self, window_size, scaler_type='standard'):
+        self.window_size = window_size
+        self.scaler_type = scaler_type
+        self.all_stats = None  # 保存每个样本标准化时使用的统计量(用于反标准化)
+
+    def fit_transform(self, data):
+        """对数据进行滚动标准化并保存最后一个窗口的统计量"""
+        normalized_data = []
+        all_stats = []  # 存储每个样本对应的统计量
+        n = len(data)
+
+        for i in range(n):
+            # 取当前位置前的窗口数据(不含当前值，避免数据泄露)
+            start_idx = max(0, i - self.window_size)
+            window_data = data[start_idx:i]
+
+            # 计算窗口统计量
+            if len(window_data) == 0:
+                mean = 0.0
+                std = 1.0
+                stats = (mean, std)
+            else:
+                mean = window_data.mean()
+                std = window_data.std() if window_data.std() != 0 else 1.0
+                stats = (mean, std)
+
+            # 标准化当前值
+            if self.scaler_type == 'minmax':
+                min_val = window_data.min() if len(window_data) > 0 else data[i]
+                max_val = window_data.max() if len(window_data) > 0 else data[i]
+                if max_val == min_val:
+                    normalized = 0.0
+                else:
+                    normalized = (data[i] - min_val) / (max_val - min_val)
+                # self.last_stats = (min_val, max_val)  # 保存min/max用于反归一化
+            else:
+                # 标准化/稳健标准化（使用窗口内的mean/std）
+                mean, std = stats
+                normalized = (data[i] - mean) / std
+                # self.last_stats = (mean, std)  # 保存均值和标准差
+
+            normalized_data.append(normalized)
+            all_stats.append(stats)
+
+        # 保存所有样本的统计量（用于反标准化）
+        self.all_stats = np.array(all_stats)
+        return np.array(normalized_data)
+
+    def inverse_transform(self, normalized_data, indices=None):
+        """使用最后保存的统计量反标准化"""
+        if self.all_stats is None:
+            raise ValueError("请先调用fit_transform进行拟合")
+
+        # 确定需要反标准化的样本索引
+        if indices is None:
+            indices = len(normalized_data)
+        # 提取这些样本对应的统计量
+        stats = self.all_stats[-indices:]
+
+        # 反标准化
+        if self.scaler_type == 'minmax':
+            min_vals = stats[:, 0]
+            max_vals = stats[:, 1]
+            # 处理min=max的情况
+            mask = (max_vals == min_vals)
+            result = np.where(
+                mask,
+                np.zeros_like(normalized_data),
+                normalized_data * (max_vals - min_vals) + min_vals
+            )
+        else:
+            means = stats[:, 0]
+            stds = stats[:, 1]
+            result = normalized_data * stds + means
+
+        return result

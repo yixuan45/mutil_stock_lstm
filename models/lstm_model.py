@@ -60,8 +60,12 @@ class LSTMStockPredictor(nn.Module):
         # LSTM层前向传播:output形状(batch_size,seq_len,hidden_size)
         lstm_out, _ = self.lstm(x)
 
-        # 取最后一个时间步的输出
-        last_step_out = lstm_out[:, -1, :]  # 形状(batch_size,hidden_size)
+        if lstm_out.dim()==3:
+            # 取最后一个时间步的输出
+            last_step_out = lstm_out[:, -1, :]  # 形状(batch_size,hidden_size)
+        else:
+            lstm_out = lstm_out.unsqueeze(0)
+            last_step_out = lstm_out[:, -1, :]
 
         # 全连接层预测：映射到目标维度
         pred_flat = self.fc(last_step_out)

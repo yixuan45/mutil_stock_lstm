@@ -98,7 +98,7 @@ class Trainer:
 
             # 前向传播
 
-            outputs = self.model(inputs).squeeze(-1) # (batch_size,seq_len,input_dim)
+            outputs = self.model(inputs).squeeze(-1)  # (batch_size,seq_len,input_dim)
 
             # 计算损失
             loss = self.criterion(outputs, targets)
@@ -178,7 +178,7 @@ class Trainer:
             # 保存最佳模型
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                self.save_model(f"best_model.pt")
+                self.save_model(f"{config['time_interval']}_best_model.pt")
                 self.early_stopping_counter = 0
                 # 重置学习率调度器
                 if self.scheduler is not None and config.get('reset_scheduler_on_best', False):
@@ -218,7 +218,7 @@ class Trainer:
         all_targets = []
 
         with torch.no_grad():
-            for inputs, targets in self.test_loader:
+            for inputs, targets in tqdm(self.test_loader):
                 # 移动数据到设备
                 inputs = inputs.to(config['device'])
                 targets = targets.to(config['device'])
@@ -264,7 +264,6 @@ class Trainer:
 
         logger.info(f"整体评估指标 - MAE: {mae:.4f}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
         return {'mae': mae, 'rmse': rmse, 'r2': r2}
-
 
     def _calculate_step_metrics(self, targets, predictions):
         """按预测步长计算评估指标"""
@@ -347,18 +346,20 @@ class Trainer:
             plt.xlabel('Time Step')
             plt.ylabel('Price')
             plt.title('Price Prediction vs True Price')
-            plt.legend()
+            # plt.legend()
+            plt.legend(loc="upper right")
             plt.grid(True)
 
-            # 绘制部分预测结果（最后100个时间步）
+            # 绘制部分预测结果（最后200个时间步）
             plt.subplot(2, 1, 2)
-            start_idx = max(0, len(targets) - 100)
+            start_idx = max(0, len(targets) - 200)
             plt.plot(range(start_idx, len(targets)), targets[start_idx:], label='True Price', alpha=0.7)
             plt.plot(range(start_idx, len(predictions)), predictions[start_idx:], label='Predicted Price', alpha=0.7)
             plt.xlabel('Time Step')
             plt.ylabel('Price')
-            plt.title('Price Prediction vs True Price (Last 100 Steps)')
-            plt.legend()
+            plt.title('Price Prediction vs True Price (Last 200 Steps)')
+            # plt.legend()
+            plt.legend(loc="upper right")
             plt.grid(True)
 
             plt.tight_layout()
@@ -366,6 +367,7 @@ class Trainer:
             # 保存图像
             plot_path = os.path.join(config['plot_dir'], 'prediction_comparison.png')
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            # plt.savefig(plot_path, dpi=300)
             logger.info(f"预测对比图已保存到 {plot_path}")
             plt.close()
         except Exception as e:

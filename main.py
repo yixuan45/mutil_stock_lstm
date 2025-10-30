@@ -32,7 +32,7 @@ def main():
         # 2. 初始化模型
         logger.info("初始化模型...")
         model = get_lstm_model()
-        logger.info(f"模型类型: {config['model_type']} 型Transformer")
+        logger.info(f"模型类型: {config['model_type']}")
         logger.info(f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
         # 3. 初始化训练器并训练
